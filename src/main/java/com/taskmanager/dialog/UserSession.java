@@ -1,7 +1,7 @@
 package com.taskmanager.dialog;
 
 /**
- * Сессия пользователя. Пока пустая — задел на будущее.
+ * Сессия пользователя. Пустая
  */
 public class UserSession {
     private final Long userId;
