@@ -36,6 +36,10 @@ public class UserService {
         return userStorage.findAll();
     }
 
+    public User save(User user) {
+        return userStorage.save(user);
+    }
+
     public User getOrCreate(Long id, String username, Role role) {
         User existing = findById(id);
         if (existing != null) return existing;
