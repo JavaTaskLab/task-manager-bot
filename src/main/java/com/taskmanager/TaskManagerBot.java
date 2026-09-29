@@ -1,81 +1,78 @@
 package com.taskmanager;
 
+import com.google.gson.JsonObject;
+import com.vk.api.sdk.client.VkApiClient;
+import com.vk.api.sdk.client.actors.GroupActor;
+import com.vk.api.sdk.httpclient.HttpTransportClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.telegram.telegrambots.bots.DefaultBotOptions;
-import org.telegram.telegrambots.bots.TelegramLongPollingBot;
-import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
-import org.telegram.telegrambots.meta.api.objects.Update;
-import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
-
-public class TaskManagerBot extends TelegramLongPollingBot {
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+public class TaskManagerBot {
 
     private static final Logger logger = LoggerFactory.getLogger(TaskManagerBot.class);
 
-    private final String botUsername;
+    private final VkApiClient vk;
+    private final GroupActor actor;
+    private final Long groupId;
+
+    public TaskManagerBot(Long groupId, String accessToken) {
+        this.groupId = groupId;
+        this.actor = new GroupActor(groupId, accessToken);
+        this.vk = new VkApiClient(new HttpTransportClient());
+    }
+
+    public VkApiClient getVk() { return vk; }
+    public GroupActor getActor() { return actor; }
+    //public Long getGroupId() { return groupId; }
 
     /**
-     * Конструктор.
-     *
-     * @param options     настройки бота (в т.ч. прокси)
-     * @param botUsername имя бота из BotFather
-     * @param botToken    токен из BotFather
+     * Обработка "сырого" JSON-объекта события из Long Poll.
      */
-    public TaskManagerBot(DefaultBotOptions options, String botUsername, String botToken) {
-        super(options, botToken); // токен передаётся в родительский класс
-        this.botUsername = botUsername;
-    }
-
-    @Override
-    public String getBotUsername() {
-        return botUsername;
-    }
-
-    @Override
-    public void onUpdateReceived(Update update) {
-
-        // Обрабатываем только текстовые сообщения
-        if (!update.hasMessage() || !update.getMessage().hasText()) {
+    public void handleRawUpdate(JsonObject update) {
+        // Проверяем, что это событие нового сообщения
+        if (!update.has("type") || !update.get("type").getAsString().equals("message_new")) {
             return;
         }
 
-        String messageText = update.getMessage().getText();
-        long chatId = update.getMessage().getChatId();
-        String userName = update.getMessage().getFrom().getUserName();
+        JsonObject messageObject = update.getAsJsonObject("object").getAsJsonObject("message");
+        String text = messageObject.get("text").getAsString();
+        int peerId = messageObject.get("peer_id").getAsInt();
 
-        logger.info("Получено сообщение от {} (chatId={}): {}", userName, chatId, messageText);
+        logger.info("Получено сообщение (peerId={}): {}", peerId, text);
 
-        switch (messageText) {
+        switch (text) {
             case "/start":
-                sendMessage(chatId, """
-                Привет! Я бот-менеджер задач.
-                Напиши /help, чтобы узнать, что я умею.""");
+                sendMessage(peerId, "Привет! Я бот-менеджер задач.\nНапиши /help, чтобы узнать, что я умею.");
                 break;
-
             case "/help":
-                sendMessage(chatId, """
-                Доступные команды:
-                /start — начать работу
-                /help — справка""");
+                sendMessage(peerId, "Доступные команды:\n/start — начать работу\n/help — справка");
                 break;
-
             default:
-                sendMessage(chatId, "Я получил твоё сообщение: " + messageText);
+                sendMessage(peerId, "Я получил твоё сообщение: " + text);
         }
     }
 
-    /**
-     * Отправляет текстовое сообщение в указанный чат.
-     */
-    private void sendMessage(long chatId, String text) {
-        SendMessage message = new SendMessage();
-        message.setChatId(String.valueOf(chatId));
-        message.setText(text);
-
+    public void sendMessage(int peerId, String text) {
         try {
-            execute(message);
-        } catch (TelegramApiException e) {
-            logger.error("Не удалось отправить сообщение в чат {}", chatId, e);
+            String url = "https://api.vk.com/method/messages.send"
+                    + "?peer_id=" + peerId
+                    + "&message=" + java.net.URLEncoder.encode(text, "UTF-8")
+                    + "&random_id=" + (System.currentTimeMillis() % Integer.MAX_VALUE)
+                    + "&access_token=" + actor.getAccessToken()
+                    + "&v=5.131";
+
+
+            HttpClient client = HttpClient.newHttpClient();
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .build();
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            logger.info("Результат отправки: {}", response.body());
+        } catch (Exception e) {
+            logger.error("Не удалось отправить сообщение", e);
         }
     }
-}
+    }

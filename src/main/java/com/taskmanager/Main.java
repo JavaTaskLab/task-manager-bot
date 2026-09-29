@@ -1,11 +1,9 @@
 package com.taskmanager;
 
+import com.vk.api.sdk.exceptions.ApiException;
+import com.vk.api.sdk.exceptions.ClientException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.telegram.telegrambots.bots.DefaultBotOptions;
-import org.telegram.telegrambots.meta.TelegramBotsApi;
-import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
-import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
 
 import java.io.InputStream;
 import java.util.Properties;
@@ -16,7 +14,7 @@ public class Main {
 
     public static void main(String[] args) {
 
-        // --- 1. Читаем настройки из application.properties ---
+        // --- 1. Читаем настройки ---
         Properties props = new Properties();
         try (InputStream input = Main.class.getClassLoader()
                 .getResourceAsStream("application.properties")) {
@@ -30,26 +28,40 @@ public class Main {
             return;
         }
 
-        String botUsername = props.getProperty("bot.username");
-        String botToken = props.getProperty("bot.token");
-
-        if (botUsername == null || botToken == null) {
-            logger.error("В application.properties не заданы bot.username или bot.token");
+        Long groupId;
+        String accessToken;
+        try {
+            groupId = Long.parseLong(props.getProperty("vk.group.id"));
+            accessToken = props.getProperty("vk.access.token");
+        } catch (NumberFormatException e) {
+            logger.error("Некорректный vk.group.id в application.properties", e);
             return;
         }
 
-        // --- 2. Настройка прокси (раскомментируйте, если нужен) ---
-        DefaultBotOptions botOptions = new DefaultBotOptions();
-        // botOptions.setProxyHost("127.0.0.1");
-        // botOptions.setProxyPort(7890);
-        // botOptions.setProxyType(DefaultBotOptions.ProxyType.SOCKS5);
+        if (accessToken == null || accessToken.isBlank()) {
+            logger.error("В application.properties не задан vk.access.token");
+            return;
+        }
 
-        // --- 3. Запуск бота ---
+        // --- 2. Создаём бота ---
+        TaskManagerBot bot = new TaskManagerBot(groupId, accessToken);
+
+        // --- 3. Включаем Long Poll и запускаем обработчик ---
         try {
-            TelegramBotsApi botsApi = new TelegramBotsApi(DefaultBotSession.class);
-            botsApi.registerBot(new TaskManagerBot(botOptions, botUsername, botToken));
-            logger.info("Бот успешно запущен!");
-        } catch (TelegramApiException e) {
+            bot.getVk().groups()
+                    .setLongPollSettings(bot.getActor(), groupId)
+                    .enabled(true)
+                    .messageNew(true)
+                    .execute();
+
+            GroupLongPollHandler handler = new GroupLongPollHandler(
+                    bot.getVk(), bot.getActor(), groupId, bot);
+
+            handler.init();     // получаем server, key, ts
+            logger.info("VK-бот успешно запущен!");
+            handler.run();      // бесконечный цикл
+
+        } catch (ApiException | ClientException e) {
             logger.error("Ошибка при запуске бота", e);
         }
     }
