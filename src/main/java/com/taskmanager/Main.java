@@ -1,7 +1,11 @@
 package com.taskmanager;
 
-import com.vk.api.sdk.exceptions.ApiException;
-import com.vk.api.sdk.exceptions.ClientException;
+import com.taskmanager.service.TaskService;
+import com.taskmanager.service.UserService;
+import com.taskmanager.storage.TaskStorage;
+import com.taskmanager.storage.UserStorage;
+import com.taskmanager.storage.InMemoryTaskStorage;
+import com.taskmanager.storage.InMemoryUserStorage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,40 +32,32 @@ public class Main {
             return;
         }
 
-        Long groupId;
-        String accessToken;
-        try {
-            groupId = Long.parseLong(props.getProperty("vk.group.id"));
-            accessToken = props.getProperty("vk.access.token");
-        } catch (NumberFormatException e) {
-            logger.error("Некорректный vk.group.id в application.properties", e);
-            return;
-        }
+        Long groupId = Long.parseLong(props.getProperty("vk.group.id"));
+        String accessToken = props.getProperty("vk.access.token");
 
         if (accessToken == null || accessToken.isBlank()) {
             logger.error("В application.properties не задан vk.access.token");
             return;
         }
 
-        // --- 2. Создаём бота ---
-        TaskManagerBot bot = new TaskManagerBot(groupId, accessToken);
+        // --- 2. Создаём хранилища ---
+        TaskStorage taskStorage = new InMemoryTaskStorage();
+        UserStorage userStorage = new InMemoryUserStorage();
 
-        // --- 3. Включаем Long Poll и запускаем обработчик ---
+        // --- 3. Создаём сервисы ---
+        TaskService taskService = new TaskService(taskStorage, userStorage);
+        UserService userService = new UserService(userStorage);
+
+        // --- 4. Создаём бота ---
+        TaskManagerBot bot = new TaskManagerBot(groupId, accessToken, taskService, userService);
+        GroupLongPollHandler handler = new GroupLongPollHandler(bot);
+
+        // --- 5. Запускаем ---
         try {
-            bot.getVk().groups()
-                    .setLongPollSettings(bot.getActor(), groupId)
-                    .enabled(true)
-                    .messageNew(true)
-                    .execute();
-
-            GroupLongPollHandler handler = new GroupLongPollHandler(
-                    bot.getVk(), bot.getActor(), groupId, bot);
-
-            handler.init();     // получаем server, key, ts
+            handler.init();
             logger.info("VK-бот успешно запущен!");
-            handler.run();      // бесконечный цикл
-
-        } catch (ApiException | ClientException e) {
+            handler.run();
+        } catch (Exception e) {
             logger.error("Ошибка при запуске бота", e);
         }
     }

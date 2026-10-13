@@ -1,129 +1,181 @@
 package com.taskmanager;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.taskmanager.dialog.DialogManager;
-import com.taskmanager.model.Role;
-import com.taskmanager.model.User;
 import com.taskmanager.service.TaskService;
 import com.taskmanager.service.UserService;
-import com.taskmanager.storage.InMemoryTaskStorage;
-import com.taskmanager.storage.InMemoryUserStorage;
-import com.taskmanager.storage.TaskStorage;
-import com.taskmanager.storage.UserStorage;
-import com.vk.api.sdk.client.VkApiClient;
-import com.vk.api.sdk.client.actors.GroupActor;
-import com.vk.api.sdk.exceptions.ApiException;
-import com.vk.api.sdk.exceptions.ClientException;
-import com.vk.api.sdk.httpclient.HttpTransportClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 
 public class TaskManagerBot {
 
     private static final Logger logger = LoggerFactory.getLogger(TaskManagerBot.class);
 
-    private final VkApiClient vk;
-    private final GroupActor actor;
     private final Long groupId;
-
-    // Бизнес-логика
-    private final UserService userService;
-    private final TaskService taskService;
+    private final String accessToken;
+    private final HttpClient httpClient;
     private final DialogManager dialogManager;
 
-    public TaskManagerBot(Long groupId, String accessToken) {
+    public TaskManagerBot(Long groupId, String accessToken,
+                          TaskService taskService, UserService userService) {
         this.groupId = groupId;
-        this.actor = new GroupActor(groupId, accessToken);
-        this.vk = new VkApiClient(new HttpTransportClient());
-
-        // --- Инициализация хранилищ и сервисов ---
-        TaskStorage taskStorage = new InMemoryTaskStorage();
-        UserStorage userStorage = new InMemoryUserStorage();
-
-        this.userService = new UserService(userStorage);
-        this.taskService = new TaskService(taskStorage, userStorage);
+        this.accessToken = accessToken;
+        this.httpClient = HttpClient.newHttpClient();
         this.dialogManager = new DialogManager(taskService, userService);
-
-        logger.info("Токен получен, длина: {}", accessToken != null ? accessToken.length() : "null");
-        logger.info("Бизнес-логика инициализирована");
+        logger.info("Бот создан. groupId={}", groupId);
     }
 
-    public VkApiClient getVk() { return vk; }
-    public GroupActor getActor() { return actor; }
     public Long getGroupId() { return groupId; }
+    public String getAccessToken() { return accessToken; }
 
-    /**
-     * Обработка "сырого" JSON-объекта события из Long Poll.
-     */
     public void handleRawUpdate(JsonObject update) {
-        if (!update.has("type") || !update.get("type").getAsString().equals("message_new")) {
+        String type = update.has("type") ? update.get("type").getAsString() : "";
+
+        // --- Стартовое сообщение при первом разрешении сообщений ---
+        if (type.equals("message_allow")) {
+            JsonObject object = update.getAsJsonObject("object");
+            int userId = object.get("user_id").getAsInt();
+            logger.info("Пользователь {} разрешил сообщения. Отправляем стартовое сообщение.", userId);
+            sendStartMessage(userId);
+            return;
+        }
+
+        if (!type.equals("message_new")) {
             return;
         }
 
         JsonObject messageObject = update.getAsJsonObject("object").getAsJsonObject("message");
         String text = messageObject.get("text").getAsString();
         int peerId = messageObject.get("peer_id").getAsInt();
-        int fromId = messageObject.get("from_id").getAsInt();
 
-        logger.info("Получено сообщение (peerId={}, fromId={}): {}", peerId, fromId, text);
+        logger.info("Получено сообщение (peerId={}): {}", peerId, text);
 
-        // В личке peerId == userId; в беседе peerId > 2_000_000_000
-        long userId = (peerId > 2_000_000_000L) ? fromId : peerId;
-
-        // Регистрируем пользователя (первый становится MANAGER)
-        ensureUserExists(userId);
-
-        // Передаём в бизнес-логику
-        String response;
-        try {
-            response = dialogManager.processCommand(userId, text);
-        } catch (Exception e) {
-            logger.error("Ошибка при обработке команды", e);
-            response = "❌ Внутренняя ошибка: " + e.getMessage();
-        }
-
-        sendMessage(peerId, response);
-    }
-
-    /**
-     * Создаёт пользователя в UserService, если его ещё нет.
-     * Первый зарегистрированный получает роль MANAGER.
-     */
-    private void ensureUserExists(long userId) {
-        if (userService.findById(userId) != null) {
+        // --- Обработка кнопки «Начать» ---
+        if (text.equals("🏠 Начать") || text.equals("/start")) {
+            sendMainMenu(peerId);
             return;
         }
-        Role role = userService.findAll().isEmpty() ? Role.MANAGER : Role.EXECUTOR;
-        User created = User.create("user_" + userId, role).withId(userId);
-        userService.save(created);
-        logger.info("Зарегистрирован новый пользователь: id={}, role={}", userId, role);
+
+        // --- Обычная обработка через DialogManager ---
+        String command = mapButtonToCommand(text);
+        String response = dialogManager.processCommand((long) peerId, command);
+        sendMessage(peerId, response, buildMainKeyboard());
     }
 
     /**
-     * Отправка сообщения через прямой HTTP-запрос к VK API.
+     * Отправляет стартовое сообщение с одной кнопкой «🏠 Начать».
      */
-    public void sendMessage(int peerId, String text) {
+    private void sendStartMessage(int peerId) {
+        String startKeyboard = """
+                {
+                  "one_time": true,
+                  "buttons": [
+                    [
+                      {
+                        "action": {"type": "text", "label": "🏠 Начать"},
+                        "color": "positive"
+                      }
+                    ]
+                  ]
+                }
+                """;
+        sendMessage(peerId,
+                "👋 Добро пожаловать в Task Manager Bot!\nНажмите «🏠 Начать», чтобы приступить.",
+                startKeyboard);
+    }
+
+    /**
+     * Показывает основное меню с 4 кнопками.
+     */
+    private void sendMainMenu(int peerId) {
+        sendMessage(peerId,
+                "Выберите действие:",
+                buildMainKeyboard());
+    }
+
+    /**
+     * Преобразует текст кнопки в команду для DialogManager.
+     */
+    private String mapButtonToCommand(String text) {
+        return switch (text) {
+            case "❓ Помощь", "/help"   -> "/help";
+            case "📋 Мои задачи"        -> "my tasks";
+            case "📊 Все задачи"        -> "list";
+            case "⚠️ Просроченные"      -> "overdue";
+            default -> text;
+        };
+    }
+
+    /**
+     * Основная клавиатура с 4 кнопками.
+     */
+    private String buildMainKeyboard() {
+        return """
+                {
+                  "one_time": false,
+                  "buttons": [
+                    [
+                      {
+                        "action": {"type": "text", "label": "📋 Мои задачи"},
+                        "color": "primary"
+                      },
+                      {
+                        "action": {"type": "text", "label": "📊 Все задачи"},
+                        "color": "secondary"
+                      }
+                    ],
+                    [
+                      {
+                        "action": {"type": "text", "label": "⚠️ Просроченные"},
+                        "color": "negative"
+                      },
+                      {
+                        "action": {"type": "text", "label": "❓ Помощь"},
+                        "color": "secondary"
+                      }
+                    ]
+                  ]
+                }
+                """;
+    }
+
+    public void sendMessage(int peerId, String text, String keyboardJson) {
         try {
+            String encodedText = URLEncoder.encode(text, StandardCharsets.UTF_8);
+            String encodedKeyboard = URLEncoder.encode(keyboardJson, StandardCharsets.UTF_8);
+            int randomId = (int) (System.currentTimeMillis() % Integer.MAX_VALUE);
+
             String url = "https://api.vk.com/method/messages.send"
                     + "?peer_id=" + peerId
-                    + "&message=" + java.net.URLEncoder.encode(text, "UTF-8")
-                    + "&random_id=" + (System.currentTimeMillis() % Integer.MAX_VALUE)
-                    + "&access_token=" + actor.getAccessToken()
+                    + "&message=" + encodedText
+                    + "&keyboard=" + encodedKeyboard
+                    + "&random_id=" + randomId
+                    + "&access_token=" + accessToken
                     + "&v=5.131";
 
-            HttpClient client = HttpClient.newHttpClient();
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
+                    .GET()
                     .build();
-            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-            logger.info("Результат отправки: {}", response.body());
+
+            HttpResponse<String> response = httpClient.send(request,
+                    HttpResponse.BodyHandlers.ofString());
+
+            JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
+            if (json.has("error")) {
+                logger.error("VK API вернул ошибку: {}", json.getAsJsonObject("error"));
+            }
+
         } catch (Exception e) {
-            logger.error("Не удалось отправить сообщение", e);
+            logger.error("Не удалось отправить сообщение в чат {}", peerId, e);
         }
     }
 }

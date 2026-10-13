@@ -3,11 +3,6 @@ package com.taskmanager;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
-import com.vk.api.sdk.client.VkApiClient;
-import com.vk.api.sdk.client.actors.GroupActor;
-import com.vk.api.sdk.exceptions.ApiException;
-import com.vk.api.sdk.exceptions.ClientException;
-import com.vk.api.sdk.objects.groups.responses.GetLongPollServerResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,14 +10,13 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 
 public class GroupLongPollHandler {
 
     private static final Logger logger = LoggerFactory.getLogger(GroupLongPollHandler.class);
 
-    private final VkApiClient vk;
-    private final GroupActor actor;
-    private final Long groupId;
     private final TaskManagerBot bot;
     private final Gson gson = new Gson();
 
@@ -30,24 +24,30 @@ public class GroupLongPollHandler {
     private String key;
     private int ts;
 
-    public GroupLongPollHandler(VkApiClient vk, GroupActor actor, Long groupId, TaskManagerBot bot) {
-        this.vk = vk;
-        this.actor = actor;
-        this.groupId = groupId;
+    public GroupLongPollHandler(TaskManagerBot bot) {
         this.bot = bot;
     }
 
     /**
-     * Получает адрес Long Poll сервера и ключ.
+     * Получает адрес Long Poll сервера и ключ через groups.getLongPollServer.
      */
-    public void init() throws ClientException, ApiException {
-        GetLongPollServerResponse response = vk.groups()
-                .getLongPollServer(actor, groupId)
-                .execute();
+    public void init() throws Exception {
+        String url = "https://api.vk.com/method/groups.getLongPollServer"
+                + "?group_id=" + bot.getGroupId()
+                + "&access_token=" + bot.getAccessToken()
+                + "&v=5.131";
 
-        this.server = response.getServer().toString();
-        this.key = response.getKey();
-        this.ts = Integer.parseInt(response.getTs());
+        String jsonResponse = loadJson(url);
+        JsonObject root = gson.fromJson(jsonResponse, JsonObject.class);
+
+        if (root.has("error")) {
+            throw new RuntimeException("VK API error: " + root.getAsJsonObject("error"));
+        }
+
+        JsonObject response = root.getAsJsonObject("response");
+        this.server = response.get("server").getAsString();
+        this.key = response.get("key").getAsString();
+        this.ts = response.get("ts").getAsInt();
 
         logger.info("Long Poll инициализирован: server={}, ts={}", server, ts);
     }
@@ -58,40 +58,27 @@ public class GroupLongPollHandler {
     public void run() {
         while (true) {
             try {
-                String urlString = server
-                        + "?act=a_check&key=" + key
-                        + "&ts=" + ts
-                        + "&wait=25";
-                String jsonResponse = loadJson(urlString);
+                String url = server + "?act=a_check&key=" + key
+                        + "&ts=" + ts + "&wait=25";
+
+                String jsonResponse = loadJson(url);
                 JsonObject root = gson.fromJson(jsonResponse, JsonObject.class);
 
-                if (root == null) {
-                    continue;
-                }
-
-                // Проверяем, не пришла ли ошибка от VK
                 if (root.has("failed")) {
-                    int failed = root.get("failed").getAsInt();
-                    logger.warn("Long Poll вернул failed={}, переинициализация", failed);
+                    logger.warn("Long Poll вернул ошибку, переинициализация...");
                     init();
                     continue;
                 }
 
-                // Обновляем ts
                 if (root.has("ts")) {
                     ts = root.get("ts").getAsInt();
                 }
 
-                // Обрабатываем массив updates
                 if (root.has("updates")) {
                     JsonArray updates = root.getAsJsonArray("updates");
                     for (int i = 0; i < updates.size(); i++) {
                         JsonObject update = updates.get(i).getAsJsonObject();
-                        try {
-                            bot.handleRawUpdate(update);
-                        } catch (Exception e) {
-                            logger.error("Ошибка при обработке update", e);
-                        }
+                        bot.handleRawUpdate(update);
                     }
                 }
 
