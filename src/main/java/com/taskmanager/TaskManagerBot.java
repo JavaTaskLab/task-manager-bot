@@ -3,8 +3,8 @@ package com.taskmanager;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.taskmanager.dialog.DialogManager;
-import com.taskmanager.service.TaskService;
-import com.taskmanager.service.UserService;
+import com.taskmanager.vk.ButtonMapper;
+import com.taskmanager.vk.VkKeyboardBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,15 +22,19 @@ public class TaskManagerBot {
     private final Long groupId;
     private final String accessToken;
     private final HttpClient httpClient;
-    private final DialogManager dialogManager;
 
-    public TaskManagerBot(Long groupId, String accessToken,
-                          TaskService taskService, UserService userService) {
+    // Зависимости
+    private final DialogManager dialogManager;
+    private final VkKeyboardBuilder keyboardBuilder;
+    private final ButtonMapper buttonMapper;
+
+    public TaskManagerBot(Long groupId, String accessToken, DialogManager dialogManager) {
         this.groupId = groupId;
         this.accessToken = accessToken;
         this.httpClient = HttpClient.newHttpClient();
-        this.dialogManager = new DialogManager(taskService, userService);
-        logger.info("Бот создан. groupId={}", groupId);
+        this.dialogManager = dialogManager;
+        this.keyboardBuilder = new VkKeyboardBuilder();
+        this.buttonMapper = new ButtonMapper();
     }
 
     public Long getGroupId() { return groupId; }
@@ -39,18 +43,13 @@ public class TaskManagerBot {
     public void handleRawUpdate(JsonObject update) {
         String type = update.has("type") ? update.get("type").getAsString() : "";
 
-        // --- Стартовое сообщение при первом разрешении сообщений ---
         if (type.equals("message_allow")) {
-            JsonObject object = update.getAsJsonObject("object");
-            int userId = object.get("user_id").getAsInt();
-            logger.info("Пользователь {} разрешил сообщения. Отправляем стартовое сообщение.", userId);
-            sendStartMessage(userId);
+            int userId = update.getAsJsonObject("object").get("user_id").getAsInt();
+            sendMessage(userId, "👋 Добро пожаловать! Нажмите кнопку ниже.", keyboardBuilder.buildStartKeyboard());
             return;
         }
 
-        if (!type.equals("message_new")) {
-            return;
-        }
+        if (!type.equals("message_new")) return;
 
         JsonObject messageObject = update.getAsJsonObject("object").getAsJsonObject("message");
         String text = messageObject.get("text").getAsString();
@@ -58,96 +57,22 @@ public class TaskManagerBot {
 
         logger.info("Получено сообщение (peerId={}): {}", peerId, text);
 
-        // --- Обработка кнопки «Начать» ---
-        if (text.equals("🏠 Начать") || text.equals("/start")) {
-            sendMainMenu(peerId);
-            return;
-        }
+        // 1. Маппим текст в команду
+        String command = buttonMapper.toCommand(text);
 
-        // --- Обычная обработка через DialogManager ---
-        String command = mapButtonToCommand(text);
+        // 2. Получаем текстовый ответ от DialogManager
         String response = dialogManager.processCommand((long) peerId, command);
-        sendMessage(peerId, response, buildMainKeyboard());
+
+        // 3. Выбираем клавиатуру (стартовую или основную)
+        String keyboard = text.equals("🏠 Начать") || text.equals("/start")
+                ? keyboardBuilder.buildMainKeyboard()
+                : keyboardBuilder.buildMainKeyboard(); // Пока всегда основная
+
+        // 4. Отправляем
+        sendMessage(peerId, response, keyboard);
     }
 
-    /**
-     * Отправляет стартовое сообщение с одной кнопкой «🏠 Начать».
-     */
-    private void sendStartMessage(int peerId) {
-        String startKeyboard = """
-                {
-                  "one_time": true,
-                  "buttons": [
-                    [
-                      {
-                        "action": {"type": "text", "label": "🏠 Начать"},
-                        "color": "positive"
-                      }
-                    ]
-                  ]
-                }
-                """;
-        sendMessage(peerId,
-                "👋 Добро пожаловать в Task Manager Bot!\nНажмите «🏠 Начать», чтобы приступить.",
-                startKeyboard);
-    }
-
-    /**
-     * Показывает основное меню с 4 кнопками.
-     */
-    private void sendMainMenu(int peerId) {
-        sendMessage(peerId,
-                "Выберите действие:",
-                buildMainKeyboard());
-    }
-
-    /**
-     * Преобразует текст кнопки в команду для DialogManager.
-     */
-    private String mapButtonToCommand(String text) {
-        return switch (text) {
-            case "❓ Помощь", "/help"   -> "/help";
-            case "📋 Мои задачи"        -> "my tasks";
-            case "📊 Все задачи"        -> "list";
-            case "⚠️ Просроченные"      -> "overdue";
-            default -> text;
-        };
-    }
-
-    /**
-     * Основная клавиатура с 4 кнопками.
-     */
-    private String buildMainKeyboard() {
-        return """
-                {
-                  "one_time": false,
-                  "buttons": [
-                    [
-                      {
-                        "action": {"type": "text", "label": "📋 Мои задачи"},
-                        "color": "primary"
-                      },
-                      {
-                        "action": {"type": "text", "label": "📊 Все задачи"},
-                        "color": "secondary"
-                      }
-                    ],
-                    [
-                      {
-                        "action": {"type": "text", "label": "⚠️ Просроченные"},
-                        "color": "negative"
-                      },
-                      {
-                        "action": {"type": "text", "label": "❓ Помощь"},
-                        "color": "secondary"
-                      }
-                    ]
-                  ]
-                }
-                """;
-    }
-
-    public void sendMessage(int peerId, String text, String keyboardJson) {
+    private void sendMessage(int peerId, String text, String keyboardJson) {
         try {
             String encodedText = URLEncoder.encode(text, StandardCharsets.UTF_8);
             String encodedKeyboard = URLEncoder.encode(keyboardJson, StandardCharsets.UTF_8);
@@ -161,19 +86,13 @@ public class TaskManagerBot {
                     + "&access_token=" + accessToken
                     + "&v=5.131";
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request,
-                    HttpResponse.BodyHandlers.ofString());
+            HttpRequest request = HttpRequest.newBuilder().uri(URI.create(url)).GET().build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
             JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
             if (json.has("error")) {
                 logger.error("VK API вернул ошибку: {}", json.getAsJsonObject("error"));
             }
-
         } catch (Exception e) {
             logger.error("Не удалось отправить сообщение в чат {}", peerId, e);
         }

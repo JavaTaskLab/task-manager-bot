@@ -1,52 +1,33 @@
 package com.taskmanager;
 
 import com.taskmanager.dialog.DialogManager;
-import com.taskmanager.model.Role;
-import com.taskmanager.model.User;
-import com.taskmanager.service.TaskService;
-import com.taskmanager.service.UserService;
-import com.taskmanager.storage.InMemoryTaskStorage;
-import com.taskmanager.storage.InMemoryUserStorage;
-import com.taskmanager.storage.TaskStorage;
-import com.taskmanager.storage.UserStorage;
 
 import java.util.Scanner;
 
 public class ConsoleApp {
 
-    public static void main(String[] args) {
-        TaskStorage taskStorage = new InMemoryTaskStorage();
-        UserStorage userStorage = new InMemoryUserStorage();
+    private final DialogManager dialogManager;
 
-        UserService userService = new UserService(userStorage);
-        TaskService taskService = new TaskService(taskStorage, userStorage);
+    public ConsoleApp(DialogManager dialogManager) {
+        this.dialogManager = dialogManager;
+    }
 
-        // Демо-пользователи
-        if (userStorage.findAll().isEmpty()) {
-            userService.createUser("Aleksa", Role.MANAGER);
-            userService.createUser("Petrov", Role.EXECUTOR);
-            userService.createUser("Sidorov", Role.EXECUTOR);
-        }
-
-        DialogManager dialogManager = new DialogManager(taskService, userService);
-        User currentUser = userService.findByUsername("Aleksa");
-
-        System.out.println("🤖 Task Manager Bot (консоль)");
-        System.out.println("Вы вошли как: " + currentUser.username()
-                + " (" + currentUser.role().getDisplayName() + ")");
-        System.out.println("Введите /help или 'exit'.\n");
+    public void start() {
+        System.out.println("=== Консольный режим Task Manager ===");
+        System.out.println("Введите /help для списка команд. Для выхода введите exit.");
 
         Scanner scanner = new Scanner(System.in);
+        Long userId = 1L; // В консоли считаем, что это первый пользователь
+
         while (true) {
             System.out.print("> ");
-            String input = scanner.nextLine().strip();
+            String input = scanner.nextLine();
 
-            if (input.equalsIgnoreCase("exit") || input.equalsIgnoreCase("quit")) {
-                System.out.println("👋 До свидания!");
+            if (input.equalsIgnoreCase("exit")) {
                 break;
             }
 
-            String response = dialogManager.processCommand(currentUser.id(), input);
+            String response = dialogManager.processCommand(userId, input);
             System.out.println(response);
         }
     }
