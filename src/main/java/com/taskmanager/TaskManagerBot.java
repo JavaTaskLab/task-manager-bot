@@ -1,10 +1,15 @@
 package com.taskmanager;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.taskmanager.dialog.DialogManager;
-import com.taskmanager.vk.ButtonMapper;
+import com.taskmanager.service.TaskService;
+import com.taskmanager.service.UserService;
+import com.taskmanager.util.Messages;
 import com.taskmanager.vk.VkKeyboardBuilder;
+import com.taskmanager.vk.dto.VkMessage;
+import com.taskmanager.vk.dto.VkUpdate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,77 +27,110 @@ public class TaskManagerBot {
     private final Long groupId;
     private final String accessToken;
     private final HttpClient httpClient;
-
-    // Зависимости
     private final DialogManager dialogManager;
-    private final VkKeyboardBuilder keyboardBuilder;
-    private final ButtonMapper buttonMapper;
+    private final Gson gson = new Gson();
 
-    public TaskManagerBot(Long groupId, String accessToken, DialogManager dialogManager) {
+    public TaskManagerBot(Long groupId, String accessToken,
+                          TaskService taskService, UserService userService) {
         this.groupId = groupId;
         this.accessToken = accessToken;
         this.httpClient = HttpClient.newHttpClient();
-        this.dialogManager = dialogManager;
-        this.keyboardBuilder = new VkKeyboardBuilder();
-        this.buttonMapper = new ButtonMapper();
+        this.dialogManager = new DialogManager(taskService, userService);
+        logger.info("Бот создан. groupId={}", groupId);
     }
 
     public Long getGroupId() { return groupId; }
     public String getAccessToken() { return accessToken; }
 
-    public void handleRawUpdate(JsonObject update) {
-        String type = update.has("type") ? update.get("type").getAsString() : "";
+    public void handleRawUpdate(JsonObject rawUpdate) {
+        VkUpdate update = gson.fromJson(rawUpdate, VkUpdate.class);
 
-        if (type.equals("message_allow")) {
-            int userId = update.getAsJsonObject("object").get("user_id").getAsInt();
-            sendMessage(userId, "👋 Добро пожаловать! Нажмите кнопку ниже.", keyboardBuilder.buildStartKeyboard());
+        if (update.isMessageAllow()) {
+            int userId = update.getAllowUserId();
+            sendStartMessage(userId);
             return;
         }
 
-        if (!type.equals("message_new")) return;
+        if (!update.isMessageNew()) return;
 
-        JsonObject messageObject = update.getAsJsonObject("object").getAsJsonObject("message");
-        String text = messageObject.get("text").getAsString();
-        int peerId = messageObject.get("peer_id").getAsInt();
+        VkMessage message = update.getMessage();
+        if (message == null || message.text == null) return;
 
-        logger.info("Получено сообщение (peerId={}): {}", peerId, text);
+        if (message.text.equals(Messages.get("vk.btn_start")) || message.text.equals("/start")) {
+            sendMainMenu(message.peer_id);
+            return;
+        }
 
-        // 1. Маппим текст в команду
-        String command = buttonMapper.toCommand(text);
-
-        // 2. Получаем текстовый ответ от DialogManager
-        String response = dialogManager.processCommand((long) peerId, command);
-
-        // 3. Выбираем клавиатуру (стартовую или основную)
-        String keyboard = text.equals("🏠 Начать") || text.equals("/start")
-                ? keyboardBuilder.buildMainKeyboard()
-                : keyboardBuilder.buildMainKeyboard(); // Пока всегда основная
-
-        // 4. Отправляем
-        sendMessage(peerId, response, keyboard);
+        String command = mapButtonToCommand(message.text);
+        String response = dialogManager.processCommand((long) message.peer_id, command);
+        
+        sendMessage(message.peer_id, response, buildMainKeyboard());
     }
 
-    private void sendMessage(int peerId, String text, String keyboardJson) {
-        try {
-            String encodedText = URLEncoder.encode(text, StandardCharsets.UTF_8);
-            String encodedKeyboard = URLEncoder.encode(keyboardJson, StandardCharsets.UTF_8);
-            int randomId = (int) (System.currentTimeMillis() % Integer.MAX_VALUE);
+    private void sendStartMessage(int peerId) {
+        String startKeyboard = VkKeyboardBuilder.create()
+                .oneTime(true)
+                .addTextButton(Messages.get("vk.btn_start"), "positive")
+                .build();
+        sendMessage(peerId, Messages.get("vk.start_welcome"), startKeyboard);
+    }
 
-            String url = "https://api.vk.com/method/messages.send"
-                    + "?peer_id=" + peerId
-                    + "&message=" + encodedText
-                    + "&keyboard=" + encodedKeyboard
-                    + "&random_id=" + randomId
+    private void sendMainMenu(int peerId) {
+        sendMessage(peerId, Messages.get("vk.menu_main"), buildMainKeyboard());
+    }
+
+    private String mapButtonToCommand(String text) {
+        if (text.equals(Messages.get("vk.btn_help"))) return "/help";
+        if (text.equals(Messages.get("vk.btn_my_tasks"))) return "my tasks";
+        if (text.equals(Messages.get("vk.btn_all_tasks"))) return "list";
+        if (text.equals(Messages.get("vk.btn_overdue"))) return "overdue";
+        return text;
+    }
+
+    private String buildMainKeyboard() {
+        return VkKeyboardBuilder.create()
+                .oneTime(false)
+                .addTextButton(Messages.get("vk.btn_my_tasks"), "primary")
+                .addTextButton(Messages.get("vk.btn_all_tasks"), "secondary")
+                .addRow()
+                .addTextButton(Messages.get("vk.btn_overdue"), "negative")
+                .addTextButton(Messages.get("vk.btn_help"), "secondary")
+                .build();
+    }
+
+    /**
+     * ИСПРАВЛЕНИЕ: Отправляем через POST, чтобы длинные сообщения (справка) не обрезались.
+     */
+        public void sendMessage(int peerId, String text, String keyboardJson) {
+        // ЗАЩИТА: Если текст пустой, VK API вернет ошибку. Не отправляем.
+        if (text == null || text.isBlank()) {
+            logger.warn("Попытка отправить пустое сообщение в чат {}. Отменено.", peerId);
+            return;
+        }
+
+        try {
+            String formBody = "peer_id=" + peerId
+                    + "&message=" + URLEncoder.encode(text, StandardCharsets.UTF_8)
+                    + "&keyboard=" + URLEncoder.encode(keyboardJson, StandardCharsets.UTF_8)
+                    + "&random_id=" + (System.currentTimeMillis() % Integer.MAX_VALUE)
                     + "&access_token=" + accessToken
                     + "&v=5.131";
 
-            HttpRequest request = HttpRequest.newBuilder().uri(URI.create(url)).GET().build();
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.vk.com/method/messages.send"))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .POST(HttpRequest.BodyPublishers.ofString(formBody))
+                    .build();
+
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
             JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
             if (json.has("error")) {
                 logger.error("VK API вернул ошибку: {}", json.getAsJsonObject("error"));
+            } else {
+                logger.info("Сообщение успешно отправлено (peerId={})", peerId);
             }
+
         } catch (Exception e) {
             logger.error("Не удалось отправить сообщение в чат {}", peerId, e);
         }

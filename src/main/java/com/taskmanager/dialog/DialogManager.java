@@ -3,24 +3,13 @@ package com.taskmanager.dialog;
 import com.taskmanager.model.*;
 import com.taskmanager.service.TaskService;
 import com.taskmanager.service.UserService;
+import com.taskmanager.util.Messages;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
-import java.util.ArrayList;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
-/**
- * Логика диалога: парсинг команд и формирование ответов.
- *
- * <p>НЕ зависит от способа ввода/вывода (ТЗ п.2).
- * НЕ хранит данные — это делает storage (ТЗ п.1).
- */
 public class DialogManager {
 
     private final TaskService taskService;
@@ -31,15 +20,9 @@ public class DialogManager {
         this.userService = userService;
     }
 
-    /**
-     * Обрабатывает команду и возвращает ответ.
-     *
-     * @param userId ID пользователя (в Telegram — chatId)
-     * @param input  текст команды
-     */
     public String processCommand(Long userId, String input) {
         if (input == null || input.isBlank()) {
-            return "Пустая команда. Введите /help для списка команд.";
+            return Messages.get("dialog.empty_command");
         }
 
         input = input.strip();
@@ -68,104 +51,102 @@ public class DialogManager {
                 case "show"     -> handleShow(parts);
                 case "subtask"  -> handleSubtask(parts, userId);
                 case "depend"   -> handleDepend(parts, userId);
-                default -> "Неизвестная команда: " + command + "\nВведите /help.";
+                default -> Messages.get("dialog.unknown_command", command);
             };
         } catch (Exception e) {
             e.printStackTrace();
             String msg = e.getMessage();
-            return "❌ Ошибка: " + (msg != null ? msg : e.getClass().getSimpleName());
+            return Messages.get("dialog.error", msg != null ? msg : e.getClass().getSimpleName());
         }
     }
 
     private String handleCreate(String[] parts, Long userId) {
-    String rest = String.join(" ", Arrays.copyOfRange(parts, 1, parts.length));
-    List<String> args = extractQuoted(rest);
+        String rest = String.join(" ", Arrays.copyOfRange(parts, 1, parts.length));
+        List<String> args = extractQuoted(rest);
 
-    if (args.isEmpty()) {
-        return "Использование: create \"Название\" [\"Описание\"]";
+        if (args.isEmpty()) {
+            return Messages.get("dialog.create_usage");
+        }
+
+        String title = args.get(0);
+        String description = args.size() > 1 ? args.get(1) : null;
+
+        Task task = (description != null)
+                ? taskService.createTask(title, description, userId)
+                : taskService.createTask(title, userId);
+
+        return (description != null) 
+                ? Messages.get("dialog.create_success_desc", task.id(), task.title(), description)
+                : Messages.get("dialog.create_success", task.id(), task.title());
     }
-
-    String title = args.get(0);
-    String description = args.size() > 1 ? args.get(1) : null;
-
-    Task task = (description != null)
-            ? taskService.createTask(title, description, userId)
-            : taskService.createTask(title, userId);
-
-    return "✅ Задача создана! ID: " + task.id() + ", Название: " + task.title()
-         + (description != null ? ", Описание: " + description : "");
-}
 
     private String handleDescribe(String[] parts, Long userId) {
         if (parts.length < 3) {
-            return "Использование: describe <id> \"Описание\"";
+            return Messages.get("dialog.describe_usage");
         }
         Long taskId = Long.parseLong(parts[1]);
         String rest = String.join(" ", Arrays.copyOfRange(parts, 2, parts.length));
         List<String> args = extractQuoted(rest);
 
         if (args.isEmpty()) {
-            return "❌ Опишите задачу в кавычках: describe 1 \"текст\"";
+            return Messages.get("dialog.describe_quotes");
         }
 
         Task task = taskService.setDescription(taskId, args.get(0), userId);
-        return "✅ Описание задачи #" + task.id() + " обновлено";
+        return Messages.get("dialog.describe_success", task.id());
     }
 
     private List<String> extractQuoted(String input) {
         List<String> result = new ArrayList<>();
-        Matcher m = Pattern.compile("\"([^\"]*)\"").matcher(input);
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"([^\"]*)\"").matcher(input);
         while (m.find()) {
             result.add(m.group(1));
         }
         if (result.isEmpty()) {
             String trimmed = input.strip();
-            if (!trimmed.isEmpty()) {
-                result.add(trimmed);
-            }
+            if (!trimmed.isEmpty()) result.add(trimmed);
         }
         return result;
     }
 
     private String handleAssign(String[] parts, Long userId) {
         if (parts.length < 3) {
-            return "Использование: assign <id задачи> @<имя>";
+            return Messages.get("dialog.assign_usage");
         }
         Long taskId = Long.parseLong(parts[1]);
         String username = parts[2].startsWith("@") ? parts[2].substring(1) : parts[2];
 
         User assignee = userService.findByUsername(username);
         if (assignee == null) {
-            return "❌ Пользователь не найден: " + username;
+            return Messages.get("dialog.assign_user_not_found", username);
         }
 
         Task task = taskService.assignTask(taskId, assignee.id(), userId);
-        return "✅ Задача \"" + task.title() + "\" назначена на " + username;
+        return Messages.get("dialog.assign_success", task.title(), username);
     }
 
     private String handleStatus(String[] parts, Long userId) {
         if (parts.length < 3) {
-            return "Использование: status <id> <статус>\nСтатусы: " + statusList();
+            return Messages.get("dialog.status_usage", statusList());
         }
         Long taskId = Long.parseLong(parts[1]);
         TaskStatus status = TaskStatus.fromString(parts[2]);
 
         Task task = taskService.changeStatus(taskId, status, userId);
-        return "✅ Статус задачи \"" + task.title() + "\" → " + status.getDisplayName();
+        return Messages.get("dialog.status_success", task.title(), status.getDisplayName());
     }
 
     private String handleMyTasks(Long userId) {
         var tasks = taskService.getMyTasks(userId);
         if (tasks.isEmpty()) {
-            return "📭 У вас нет задач.";
+            return Messages.get("dialog.my_tasks_empty");
         }
 
-        StringBuilder sb = new StringBuilder("📋 Ваши задачи:\n");
+        StringBuilder sb = new StringBuilder(Messages.get("dialog.my_tasks_header"));
         for (Task t : tasks) {
-            sb.append("  ").append(t.id()).append(". ")
-              .append(t.title()).append(" [").append(t.status().getDisplayName()).append("]");
+            sb.append(Messages.get("dialog.my_tasks_item", t.id(), t.title(), t.status().getDisplayName()));
             if (t.deadline() != null) {
-                sb.append(" ⏰ до ").append(t.deadline().toLocalDate());
+                sb.append(Messages.get("dialog.my_tasks_deadline", t.deadline().toLocalDate()));
             }
             sb.append("\n");
         }
@@ -174,36 +155,32 @@ public class DialogManager {
 
     private String handleDeadline(String[] parts, Long userId) {
         if (parts.length < 3) {
-            return "Использование: deadline <id> <YYYY-MM-DD>";
+            return Messages.get("dialog.deadline_usage");
         }
         Long taskId = Long.parseLong(parts[1]);
         LocalDateTime deadline = LocalDate.parse(parts[2]).atStartOfDay();
 
         Task task = taskService.setDeadline(taskId, deadline, userId);
-        return "✅ Дедлайн задачи \"" + task.title() + "\" → " + parts[2];
+        return Messages.get("dialog.deadline_success", task.title(), parts[2]);
     }
 
     private String handleOverdue() {
         var tasks = taskService.getOverdueTasks(LocalDateTime.now());
         if (tasks.isEmpty()) {
-            return "🎉 Нет просроченных задач!";
+            return Messages.get("dialog.overdue_empty");
         }
 
-        StringBuilder sb = new StringBuilder("⚠️ Просроченные задачи:\n");
+        StringBuilder sb = new StringBuilder(Messages.get("dialog.overdue_header"));
         for (Task t : tasks) {
-            sb.append("  ").append(t.id()).append(". ")
-              .append(t.title()).append(" ⏰ до ")
-              .append(t.deadline().toLocalDate()).append("\n");
+            sb.append(Messages.get("dialog.overdue_item", t.id(), t.title(), t.deadline().toLocalDate()));
+            sb.append("\n");
         }
         return sb.toString();
     }
 
     private String handleList() {
         var allTasks = taskService.getAllTasks();
-
-        if (allTasks.isEmpty()) {
-            return "📭 Задач нет.";
-        }
+        if (allTasks.isEmpty()) return Messages.get("dialog.list_empty");
 
         Set<Long> subtaskIds = allTasks.stream()
                 .flatMap(t -> t.subtaskIds().stream())
@@ -214,33 +191,19 @@ public class DialogManager {
                 .sorted(Comparator.comparing(Task::id))
                 .toList();
 
-        StringBuilder sb = new StringBuilder("📋 Все задачи:\n\n");
+        StringBuilder sb = new StringBuilder(Messages.get("dialog.list_header"));
 
         for (int i = 0; i < roots.size(); i++) {
             appendTaskTree(sb, roots.get(i), "", true, true, allTasks);
-            if (i < roots.size() - 1) {
-                sb.append("\n");
-            }
+            if (i < roots.size() - 1) sb.append("\n");
         }
-
         return sb.toString().stripTrailing();
     }
 
-    /**
-     * Рекурсивно выводит задачу и её подзадачи.
-     *
-     * @param sb       буфер
-     * @param task     текущая задача
-     * @param prefix   префикс для отступа
-     * @param isLast   последняя ли задача в списке
-     * @param isRoot   корневая ли задача (без веток)
-     * @param allTasks все задачи (для поиска подзадач)
-     */
     private void appendTaskTree(StringBuilder sb, Task task, String prefix,
                                  boolean isLast, boolean isRoot, List<Task> allTasks) {
 
         String branch = isRoot ? "📌 " : (isLast ? "└── " : "├── ");
-
         sb.append(prefix).append(branch)
           .append("#").append(task.id()).append(". ")
           .append(task.title())
@@ -267,14 +230,13 @@ public class DialogManager {
             allTasks.stream()
                     .filter(t -> t.id().equals(childId))
                     .findFirst()
-                    .ifPresent(child -> appendTaskTree(
-                            sb, child, childPrefix, childIsLast, false, allTasks));
+                    .ifPresent(child -> appendTaskTree(sb, child, childPrefix, childIsLast, false, allTasks));
         }
     }
 
     private String handleShow(String[] parts) {
         if (parts.length < 2) {
-            return "Использование: show <id>";
+            return Messages.get("dialog.show_usage");
         }
         Long taskId = Long.parseLong(parts[1]);
         Task task = taskService.getTask(taskId);
@@ -283,31 +245,29 @@ public class DialogManager {
 
     private String formatTask(Task t) {
         StringBuilder sb = new StringBuilder();
-        sb.append("📌 Задача #").append(t.id()).append("\n");
-        sb.append("  Название: ").append(t.title()).append("\n");
-
-        if (t.description() != null && !t.description().isBlank()) {
-            sb.append("  Описание: ").append(t.description()).append("\n");
-        }
-
-        sb.append("  Статус: ").append(t.status().getDisplayName()).append("\n");
-        sb.append("  Создатель: ").append(usernameOf(t.creatorId())).append("\n");
+        sb.append(Messages.get("dialog.show_header", 
+            t.id(), 
+            t.title(), 
+            t.description() != null ? t.description() : "-",
+            t.status().getDisplayName(),
+            usernameOf(t.creatorId())
+        ));
 
         if (t.assigneeId() != null) {
-            sb.append("  Исполнитель: ").append(usernameOf(t.assigneeId())).append("\n");
+            sb.append(Messages.get("dialog.show_assignee", usernameOf(t.assigneeId())));
         }
         if (t.deadline() != null) {
-            sb.append("  Дедлайн: ").append(t.deadline().toLocalDate()).append("\n");
+            sb.append(Messages.get("dialog.show_deadline", t.deadline().toLocalDate()));
         }
-        sb.append("  Создана: ").append(t.createdAt().toLocalDate()).append("\n");
+        sb.append(Messages.get("dialog.show_created", t.createdAt().toLocalDate()));
 
         if (t.hasSubtasks()) {
-            sb.append("  Подзадачи: ");
+            sb.append(Messages.get("dialog.show_subtasks"));
             for (Long id : t.subtaskIds()) sb.append("#").append(id).append(" ");
             sb.append("\n");
         }
         if (t.isBlocked()) {
-            sb.append("  ⚠️ Заблокирована: ");
+            sb.append(Messages.get("dialog.show_blocked"));
             for (Long id : t.blockedByIds()) sb.append("#").append(id).append(" ");
             sb.append("\n");
         }
@@ -316,24 +276,24 @@ public class DialogManager {
 
     private String handleSubtask(String[] parts, Long userId) {
         if (parts.length < 3) {
-            return "Использование: subtask <id родителя> <id подзадачи>";
+            return Messages.get("dialog.subtask_usage");
         }
         Long parentId = Long.parseLong(parts[1]);
         Long childId = Long.parseLong(parts[2]);
 
         taskService.addSubtask(parentId, childId, userId);
-        return "✅ Задача #" + childId + " теперь подзадача #" + parentId;
+        return Messages.get("dialog.subtask_success", childId, parentId);
     }
 
     private String handleDepend(String[] parts, Long userId) {
         if (parts.length < 3) {
-            return "Использование: depend <id задачи> <id блокирующей>";
+            return Messages.get("dialog.depend_usage");
         }
         Long taskId = Long.parseLong(parts[1]);
         Long dependsOnId = Long.parseLong(parts[2]);
 
         taskService.addDependency(taskId, dependsOnId, userId);
-        return "✅ Задача #" + taskId + " зависит от #" + dependsOnId;
+        return Messages.get("dialog.depend_success", taskId, dependsOnId);
     }
 
     private String usernameOf(Long userId) {
@@ -348,42 +308,8 @@ public class DialogManager {
         }
         return sb.substring(0, sb.length() - 2);
     }
-    
+
     private String getHelp() {
-        return """
-            🤖 Task Manager Bot — команды:
-
-            СОЗДАНИЕ:
-            create "Название"              — создать задачу
-            create "Название" "Описание"   — создать задачу с описанием
-            describe 5 "Описание"          — добавить описание к задаче #5
-
-            РАБОТА С ЗАДАЧАМИ:
-            assign 5 @Petrov               — назначить на Petrov
-            status 5 in_progress           — изменить статус
-            deadline 5 2026-10-15          — установить дедлайн
-            my tasks                       — мои задачи
-
-            ПРОСМОТР:
-            list                           — все задачи (деревом)
-            show 5                         — детали задачи #5
-            overdue                        — просроченные задачи
-
-            СВЯЗИ:
-            subtask 1 5                    — сделать #5 подзадачей #1
-            depend 5 3                     — #5 зависит от #3
-
-            ПРОЧЕЕ:
-            /help                          — эта справка
-
-            Статусы: %s
-
-            Примеры:
-            create "Написать отчёт" "Отчёт за сентябрь"
-            describe 1 "Добавить графики"
-            assign 1 @Petrov
-            status 1 in_progress
-            """.formatted(statusList());
+        return Messages.get("dialog.help", statusList());
     }
-
 }
